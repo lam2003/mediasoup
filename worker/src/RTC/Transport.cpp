@@ -1257,7 +1257,7 @@ namespace RTC
 				this->mapProducers.erase(producer->id);
 
 				// Tell the child class to clear associated SSRCs.
-				for (auto& kv : producer->GetRtpStreams())
+				for (const auto& kv : producer->GetRtpStreams())
 				{
 					auto* rtpStream = kv.first;
 
@@ -1434,6 +1434,79 @@ namespace RTC
 				break;
 			}
 
+			case Channel::Request::MethodId::DATA_CONSUMER_GET_BUFFERED_AMOUNT:
+			{
+				// This may throw.
+				RTC::DataConsumer* dataConsumer = GetDataConsumerFromInternal(request->internal);
+
+				if (dataConsumer->GetType() != RTC::DataConsumer::Type::SCTP)
+				{
+					MS_THROW_ERROR("invalid DataConsumer type");
+				}
+
+				if (!this->sctpAssociation)
+				{
+					MS_THROW_ERROR("no SCTP association present");
+				}
+
+				// Create status response.
+				json data = json::object();
+
+				data["bufferedAmount"] = this->sctpAssociation->GetSctpBufferedAmount();
+
+				request->Accept(data);
+
+				break;
+			}
+
+			case Channel::Request::MethodId::DATA_CONSUMER_SET_BUFFERED_AMOUNT_LOW_THRESHOLD:
+			{
+				// This may throw.
+				RTC::DataConsumer* dataConsumer = GetDataConsumerFromInternal(request->internal);
+
+				if (dataConsumer->GetType() != RTC::DataConsumer::Type::SCTP)
+				{
+					MS_THROW_ERROR("invalid DataConsumer type");
+				}
+
+				dataConsumer->HandleRequest(request);
+
+				break;
+			}
+
+			default:
+			{
+				MS_THROW_ERROR("unknown method '%s'", request->method.c_str());
+			}
+		}
+	}
+
+	void Transport::HandleRequest(PayloadChannel::Request* request)
+	{
+		MS_TRACE();
+
+		switch (request->methodId)
+		{
+			case PayloadChannel::Request::MethodId::DATA_CONSUMER_SEND:
+			{
+				// This may throw.
+				RTC::DataConsumer* dataConsumer = GetDataConsumerFromInternal(request->internal);
+
+				if (dataConsumer->GetType() != RTC::DataConsumer::Type::SCTP)
+				{
+					MS_THROW_ERROR("invalid DataConsumer type");
+				}
+
+				if (!this->sctpAssociation)
+				{
+					MS_THROW_ERROR("no SCTP association present");
+				}
+
+				dataConsumer->HandleRequest(request);
+
+				break;
+			}
+
 			default:
 			{
 				MS_THROW_ERROR("unknown method '%s'", request->method.c_str());
@@ -1586,6 +1659,10 @@ namespace RTC
 				break;
 			case RTC::Producer::ReceiveRtpPacketResult::RETRANSMISSION:
 				this->recvRtxTransmission.Update(packet);
+				break;
+			case RTC::Producer::ReceiveRtpPacketResult::DISCARDED:
+				// Tell the child class to remove this SSRC.
+				RecvStreamClosed(packet->GetSsrc());
 				break;
 			default:;
 		}
@@ -2637,11 +2714,11 @@ namespace RTC
 	}
 
 	inline void Transport::OnDataConsumerSendMessage(
-	  RTC::DataConsumer* dataConsumer, uint32_t ppid, const uint8_t* msg, size_t len)
+	  RTC::DataConsumer* dataConsumer, uint32_t ppid, const uint8_t* msg, size_t len, onQueuedCallback* cb)
 	{
 		MS_TRACE();
 
-		SendMessage(dataConsumer, ppid, msg, len);
+		SendMessage(dataConsumer, ppid, msg, len, cb);
 	}
 
 	inline void Transport::OnDataConsumerDataProducerClosed(RTC::DataConsumer* dataConsumer)
@@ -2781,7 +2858,28 @@ namespace RTC
 		}
 
 		// Pass the SCTP message to the corresponding DataProducer.
-		dataProducer->ReceiveMessage(ppid, msg, len);
+		try
+		{
+			dataProducer->ReceiveMessage(ppid, msg, len);
+		}
+		catch (std::exception& error)
+		{
+			// Nothing to do.
+		}
+	}
+
+	inline void Transport::OnSctpAssociationBufferedAmount(
+	  RTC::SctpAssociation* /*sctpAssociation*/, uint32_t bufferedAmount)
+	{
+		MS_TRACE();
+
+		for (const auto& kv : this->mapDataConsumers)
+		{
+			auto* dataConsumer = kv.second;
+
+			if (dataConsumer->GetType() == RTC::DataConsumer::Type::SCTP)
+				dataConsumer->SctpAssociationBufferedAmount(bufferedAmount);
+		}
 	}
 
 	inline void Transport::OnTransportCongestionControlClientBitrates(
